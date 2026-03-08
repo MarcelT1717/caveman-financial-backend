@@ -47,19 +47,24 @@ def format_volume(value):
 async def get_stock_quote(ticker: str):
     """Get real-time stock quote for a single ticker"""
     try:
-        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={ticker}"
-        
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"
+
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers)
 
         data = response.json()
 
-        result = data["quoteResponse"]["result"][0]
+        result = data["chart"]["result"][0]["meta"]
+
+        price = result["regularMarketPrice"]
+        previous = result["chartPreviousClose"]
+
+        change_percent = ((price - previous) / previous) * 100
 
         return StockQuote(
             ticker=ticker.upper(),
-            price=round(result["regularMarketPrice"], 2),
-            change_percent=round(result["regularMarketChangePercent"], 2)
+            price=round(price, 2),
+            change_percent=round(change_percent, 2)
         )
 
     except Exception as e:
