@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from typing import List, Optional
 import yfinance as yf
+import requests
 from pydantic import BaseModel
 import logging
 
@@ -46,22 +47,18 @@ def format_volume(value):
 async def get_stock_quote(ticker: str):
     """Get real-time stock quote for a single ticker"""
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        
-        current_price = info.get('currentPrice') or info.get('regularMarketPrice', 0)
-        previous_close = info.get('previousClose', current_price)
-        
-        if previous_close and previous_close != 0:
-            change_percent = ((current_price - previous_close) / previous_close) * 100
-        else:
-            change_percent = 0
-            
+        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={ticker}"
+        response = requests.get(url)
+        data = response.json()
+
+        result = data["quoteResponse"]["result"][0]
+
         return StockQuote(
             ticker=ticker.upper(),
-            price=round(current_price, 2),
-            change_percent=round(change_percent, 2)
+            price=round(result["regularMarketPrice"], 2),
+            change_percent=round(result["regularMarketChangePercent"], 2)
         )
+
     except Exception as e:
         logger.error(f"Error fetching quote for {ticker}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch data for {ticker}")
@@ -99,6 +96,29 @@ async def get_stock_details(ticker: str):
 @router.post("/stocks/batch", response_model=List[StockQuote])
 async def get_batch_quotes(tickers: List[str]):
     """Get real-time quotes for multiple tickers"""
+    try:
+        symbols = ",".join(tickers)
+
+        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbols}"
+        response = requests.get(url)
+        data = response.json()
+
+        results = []
+
+        for stock in data["quoteResponse"]["result"]:
+            results.append(
+                StockQuote(
+                    ticker=stock["symbol"],
+                    price=round(stock["regularMarketPrice"], 2),
+                    change_percent=round(stock["regularMarketChangePercent"], 2)
+                )
+            )
+
+        return results
+
+    except Exception as e:
+        logger.error(f"Batch fetch error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch batch quotes")
     results = []
     for ticker in tickers:
         try:
