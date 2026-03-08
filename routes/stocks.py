@@ -48,7 +48,10 @@ async def get_stock_quote(ticker: str):
     """Get real-time stock quote for a single ticker"""
     try:
         url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={ticker}"
-        response = requests.get(url)
+        
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers)
+
         data = response.json()
 
         result = data["quoteResponse"]["result"][0]
@@ -119,28 +122,4 @@ async def get_batch_quotes(tickers: List[str]):
     except Exception as e:
         logger.error(f"Batch fetch error: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to fetch batch quotes")
-    results = []
-    for ticker in tickers:
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
-            
-            current_price = info.get('currentPrice') or info.get('regularMarketPrice', 0)
-            previous_close = info.get('previousClose', current_price)
-            
-            if previous_close and previous_close != 0:
-                change_percent = ((current_price - previous_close) / previous_close) * 100
-            else:
-                change_percent = 0
-                
-            results.append(StockQuote(
-                ticker=ticker.upper(),
-                price=round(current_price, 2),
-                change_percent=round(change_percent, 2)
-            ))
-        except Exception as e:
-            logger.error(f"Error fetching {ticker}: {str(e)}")
-            # Continue with other tickers even if one fails
-            continue
     
-    return results
