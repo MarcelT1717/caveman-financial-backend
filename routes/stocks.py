@@ -4,9 +4,23 @@ import yfinance as yf
 import requests
 from pydantic import BaseModel
 import logging
+import time
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# Simple in-memory cache: { cache_key: (timestamp, data) }
+_cache = {}
+CACHE_TTL = 60  # seconds
+
+def _cache_get(key):
+    entry = _cache.get(key)
+    if entry and (time.time() - entry[0]) < CACHE_TTL:
+        return entry[1]
+    return None
+
+def _cache_set(key, data):
+    _cache[key] = (time.time(), data)
 
 class StockData(BaseModel):
     ticker: str
@@ -46,6 +60,11 @@ def format_volume(value):
 @router.get("/stocks/quote/{ticker}", response_model=StockQuote)
 async def get_stock_quote(ticker: str):
     """Get real-time stock quote for a single ticker"""
+    cache_key = f"quote:{ticker.upper()}"
+    cached = _cache_get(cache_key)
+    if cached:
+        return cached
+
     try:
         url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"
 
@@ -61,11 +80,13 @@ async def get_stock_quote(ticker: str):
 
         change_percent = ((price - previous) / previous) * 100
 
-        return StockQuote(
+        quote = StockQuote(
             ticker=ticker.upper(),
             price=round(price, 2),
             change_percent=round(change_percent, 2)
         )
+        _cache_set(cache_key, quote)
+        return quote
 
     except Exception as e:
         logger.error(f"Error fetching quote for {ticker}: {str(e)}")
@@ -104,27 +125,97 @@ async def get_stock_details(ticker: str):
 @router.post("/stocks/batch", response_model=List[StockQuote])
 async def get_batch_quotes(tickers: List[str]):
     """Get real-time quotes for multiple tickers"""
+    tickers = [t.upper() for t in tickers]
+    cache_key = f"batch:{','.join(sorted(tickers))}"
+    cached = _cache_get(cache_key)
+    if cached:
+        return cached
+
+    results = []
+
+    # Primary: yf.download — single HTTP call for all tickers, most reliable
     try:
-        symbols = ",".join(tickers)
+        raw = yf.download(
+            tickers=" ".join(tickers),
+            period="5d",
+            interval="1d",
+            progress=False,
+            auto_adjust=True,
+        )
 
-        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbols}"
-        response = requests.get(url)
-        data = response.json()
+        # Normalise columns: single ticker returns a flat Series, multi returns a DataFrame
+        if len(tickers) == 1:
+            closes = raw["Close"].dropna()
+            if len(closes) >= 2:
+                price = float(closes.iloc[-1])
+                prev  = float(closes.iloc[-2])
+                results.append(StockQuote(
+                    ticker=tickers[0],
+                    price=round(price, 2),
+                    change_percent=round((price - prev) / prev * 100, 2)
+                ))
+        else:
+            close_df = raw["Close"]
+            for ticker in tickers:
+                try:
+                    col = close_df[ticker].dropna()
+                    if len(col) >= 2:
+                        price = float(col.iloc[-1])
+                        prev  = float(col.iloc[-2])
+                        results.append(StockQuote(
+                            ticker=ticker,
+                            price=round(price, 2),
+                            change_percent=round((price - prev) / prev * 100, 2)
+                        ))
+                except Exception as e:
+                    logger.warning(f"download skip {ticker}: {e}")
 
-        results = []
+        if results:
+            _cache_set(cache_key, results)
+            return results
+    except Exception as e:
+        logger.warning(f"yf.download failed: {e}")
 
-        for stock in data["quoteResponse"]["result"]:
-            results.append(
-                StockQuote(
-                    ticker=stock["symbol"],
-                    price=round(stock["regularMarketPrice"], 2),
-                    change_percent=round(stock["regularMarketChangePercent"], 2)
-                )
-            )
+    # Fallback: individual history calls (slower but reliable)
+    for ticker in tickers:
+        try:
+            hist = yf.Ticker(ticker).history(period="5d")
+            if len(hist) >= 2:
+                price = float(hist["Close"].iloc[-1])
+                prev  = float(hist["Close"].iloc[-2])
+                results.append(StockQuote(
+                    ticker=ticker,
+                    price=round(price, 2),
+                    change_percent=round((price - prev) / prev * 100, 2)
+                ))
+        except Exception as e:
+            logger.warning(f"history fallback skip {ticker}: {e}")
 
+    if results:
+        _cache_set(cache_key, results)
         return results
 
+    # Last resort: Yahoo Finance API with session cookie
+    try:
+        symbols = ",".join(tickers)
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+        })
+        session.get("https://finance.yahoo.com/", timeout=10)
+        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbols}"
+        response = session.get(url, timeout=15)
+        data = response.json()
+        for stock in data["quoteResponse"]["result"]:
+            results.append(StockQuote(
+                ticker=stock["symbol"],
+                price=round(stock["regularMarketPrice"], 2),
+                change_percent=round(stock["regularMarketChangePercent"], 2)
+            ))
+        _cache_set(cache_key, results)
+        return results
     except Exception as e:
-        logger.error(f"Batch fetch error: {str(e)}")
+        logger.error(f"Batch fallback also failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch batch quotes")
     
